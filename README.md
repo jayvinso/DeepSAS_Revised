@@ -2,7 +2,7 @@ This version introduces several major enhancements:
 
 1. Phenotype-aware senescence prediction
    
-The pipeline now incorporates the Condition metadata field from adata.obs to stratify SnC prediction by phenotype (e.g., treatment, disease state).
+The pipeline now incorporates the Condition metadata field from 'adata.obs' to stratify SnC prediction by phenotype (e.g., treatment, disease state).
 
 During graph construction, each cell node is annotated with its phenotype.
 
