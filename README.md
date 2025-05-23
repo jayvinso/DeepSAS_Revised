@@ -2,7 +2,7 @@ This version introduces several major enhancements:
 
 1. Phenotype-aware senescence prediction
    
-The pipeline now incorporates the Condition metadata field from 'adata.obs' to stratify SnC prediction by phenotype (e.g., treatment, disease state).
+The pipeline now incorporates the _Condition_ metadata field from _adata.obs_ to stratify SnC prediction by phenotype (e.g., treatment, disease state).
 
 During graph construction, each cell node is annotated with its phenotype.
 
@@ -10,7 +10,7 @@ Results include per-phenotype SnC and SnG statistics, as well as z-scored SnG si
 
 3. Cell-type–specific HVG filtering
    
-Instead of applying a all genes, DeepSAS-phenotype applies independent HVG selection for each cell type through using --use_hvg_deg
+Instead of applying a all genes, DeepSAS-phenotype applies independent HVG selection for each cell type through using _--use_hvg_deg_
 
 This ensures biologically relevant genes are preserved for identifying senescence programs specific to each cell lineage.
 
