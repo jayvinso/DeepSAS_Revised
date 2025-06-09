@@ -8,13 +8,13 @@ During graph construction, each cell node is annotated with its phenotype.
 
 Results include per-phenotype SnC and SnG statistics, as well as z-scored SnG signatures per (cell type × phenotype) combination.
 
-3. Cell-type–specific HVG filtering
+2. Cell-type–specific HVG filtering
    
 Instead of applying a all genes, DeepSAS-phenotype applies independent HVG selection for each cell type through using _--use_hvg_deg_
 
 This ensures biologically relevant genes are preserved for identifying senescence programs specific to each cell lineage.
 
-5. Enhanced Output Tables
+3. Enhanced Output Tables
    
 The output now includes:
 
