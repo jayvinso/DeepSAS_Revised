@@ -1,4 +1,4 @@
-This version introduces several major enhancements:
+In this tutorial, we provide the guidance for phenotype-related analysis. The mian program with the phenotype enhenced is `deepsas_v1_phenotype_v2.py`.
 
 ### 1. Phenotype-aware senescence prediction
    
@@ -16,7 +16,7 @@ This ensures biologically relevant genes are preserved for identifying senescenc
 
 ### 3. Enhanced Output Tables
    
-The output now includes:
+After running the `generate_3tables_pheno.py`, the output now includes:
 
 `Gene_Table1_SnG_scores_per_ct_pheno.csv`: raw SnG scores for each gene across (cell type × phenotype)
 
