@@ -114,6 +114,10 @@ For datasets with many cells (>50,000), use the sampling approach detailed in [S
 - Batch processing scripts
 - Result integration methods
 
+### Phenotype related Analysis
+
+To incorporate the phenotype information into the analysis, please following the tutorial in [`xx.ipynb`](./xx.md).
+
 
 ## Input Data Format
 
