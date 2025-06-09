@@ -116,7 +116,7 @@ For datasets with many cells (>50,000), use the sampling approach detailed in [S
 
 ### Phenotype related Analysis
 
-To incorporate the phenotype information into the analysis, please following the tutorial in [`xx.ipynb`](./xx.md).
+To incorporate the phenotype information into the analysis, please following the tutorial in [`phenotype_analysis`](./phenotype_analysis/README.md).
 
 
 ## Input Data Format
