@@ -196,8 +196,13 @@ For detailed explanations of each table and column, see [Senescent_Tables_Explan
 If you use DeepSAS in your research, please cite:
 
 ```
-@article{
-   xxxx
+@article{ma2025intrinsic,
+  title={An Intrinsic-hoc Framework for Heterogeneous Cellular Senescence Elucidation Using Deep Graph Representation Learning and Experimental Validation},
+  author={Ma, Anjun and Cheng, Hao and Vanegas, Natalia Del Pilar and Ghobashi, Ahmed and Chen, Hu and Rodriguez, Jhonny and Rosas, Lorena and Wang, Cankun and Shao, Jianming and Jiang, Yi and others},
+  journal={bioRxiv},
+  pages={2025--07},
+  year={2025},
+  publisher={Cold Spring Harbor Laboratory}
 }
 ```
 
