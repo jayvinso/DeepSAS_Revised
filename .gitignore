@@ -10,6 +10,13 @@
 !Generate_table_sampling.sh
 !run_experiments.sh
 
+!encoders.py
+!evaluate.py
+!graph_builder.py
+!interpretability.py
+!losses.py
+
+
 !plot_figure.py
 !generate_3tables.py
 
