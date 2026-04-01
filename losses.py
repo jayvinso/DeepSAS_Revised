@@ -96,6 +96,92 @@ class ContextObjective(nn.Module):
         return loss_ctx, loss_dict
 
 
+#START - Proposal-faithful context objective: metadata prediction from z_ctx
+class MetadataPredictionFromCtx(nn.Module):
+    """Predicts phenotype metadata directly from per-cell z_ctx embeddings,
+    aggregated to per-sample predictions. This is the proposal's original
+    design (Section 7): L_phenotype = metadata prediction from z_ctx.
+
+    Same forward signature as ContextObjective so train.py can swap them.
+    """
+    def __init__(self, ctx_dim, n_diseases=2, n_lobes=0,
+                 predict_age=False, consistency_weight=0.0,
+                 pheno_dim=None):
+        super().__init__()
+        self.n_diseases = n_diseases
+        self.n_lobes = n_lobes
+        self.predict_age = predict_age
+        self.consistency_weight = consistency_weight
+
+        if n_diseases > 0:
+            self.disease_head = nn.Sequential(
+                Linear(ctx_dim, ctx_dim),
+                nn.ReLU(),
+                Linear(ctx_dim, n_diseases),
+            )
+        if n_lobes > 0:
+            self.lobe_head = nn.Sequential(
+                Linear(ctx_dim, ctx_dim),
+                nn.ReLU(),
+                Linear(ctx_dim, n_lobes),
+            )
+        if predict_age:
+            self.age_head = nn.Sequential(
+                Linear(ctx_dim, ctx_dim),
+                nn.ReLU(),
+                Linear(ctx_dim, 1),
+            )
+
+        if consistency_weight > 0.0 and pheno_dim is not None:
+            self.align_proj = Linear(pheno_dim, ctx_dim, bias=False)
+        else:
+            self.align_proj = None
+
+    def forward(self, z_ctx, z_pheno, cell_to_sample,
+                disease_labels_sample=None, lobe_labels_sample=None,
+                age_targets_sample=None):
+        loss_dict = {}
+        n_samples = z_pheno.shape[0] if z_pheno is not None else int(cell_to_sample.max()) + 1
+
+        # Aggregate z_ctx to per-sample by mean-pooling
+        z_ctx_sample = torch.zeros(n_samples, z_ctx.shape[1],
+                                   device=z_ctx.device, dtype=z_ctx.dtype)
+        counts = torch.zeros(n_samples, 1, device=z_ctx.device, dtype=z_ctx.dtype)
+        z_ctx_sample.scatter_add_(0, cell_to_sample.unsqueeze(1).expand_as(z_ctx), z_ctx)
+        counts.scatter_add_(0, cell_to_sample.unsqueeze(1), torch.ones_like(cell_to_sample, dtype=z_ctx.dtype).unsqueeze(1))
+        z_ctx_sample = z_ctx_sample / counts.clamp(min=1.0)
+
+        loss_meta = torch.tensor(0.0, device=z_ctx.device)
+        if self.n_diseases > 0 and disease_labels_sample is not None:
+            logits = self.disease_head(z_ctx_sample)
+            l = F.cross_entropy(logits, disease_labels_sample)
+            loss_dict['disease'] = l
+            loss_meta = loss_meta + l
+        if self.n_lobes > 0 and lobe_labels_sample is not None:
+            logits = self.lobe_head(z_ctx_sample)
+            l = F.cross_entropy(logits, lobe_labels_sample)
+            loss_dict['lobe'] = l
+            loss_meta = loss_meta + l
+        if self.predict_age and age_targets_sample is not None:
+            pred = self.age_head(z_ctx_sample).squeeze(1)
+            l = F.mse_loss(pred, age_targets_sample)
+            loss_dict['age'] = l
+            loss_meta = loss_meta + l
+
+        total = loss_meta
+
+        # Optional weak consistency term (for hybrid mode 1D)
+        if self.consistency_weight > 0.0 and self.align_proj is not None and z_pheno is not None:
+            z_pheno_proj = self.align_proj(z_pheno[cell_to_sample])
+            loss_consist = 1.0 - F.cosine_similarity(z_ctx, z_pheno_proj, dim=1).mean()
+            loss_dict['consistency'] = loss_consist
+            total = total + self.consistency_weight * loss_consist
+
+        loss_dict['total'] = total
+        return total, loss_dict
+#END
+
+
 def orthogonality_loss(z_sen, z_ctx):
     """L_orth = ||Z_sen^T @ Z_ctx||_F^2
     

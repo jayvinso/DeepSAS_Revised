@@ -129,7 +129,13 @@ def build_extended_graph_pyg(gene_cell, gene_embed, cell_embed,
     """
     gene_num = gene_cell.shape[0]
     cell_num = gene_cell.shape[1]
-    n_samples = phenotype_features.shape[0]
+
+    #START - Handle no-phenotype mode (ablation A)
+    if phenotype_features is None:
+        n_samples = 0
+    else:
+        n_samples = phenotype_features.shape[0]
+    #END
 
     # y: legacy boolean mask (True=gene, False=other). Still used by
     # model_GAT.GAEModel to separate gene vs cell projections. For 3-way
@@ -145,26 +151,31 @@ def build_extended_graph_pyg(gene_cell, gene_embed, cell_embed,
     # Phenotype features need to be projected to emb_size in the encoder,
     # so pad them to match embedding dim for graph construction
     emb_dim = gene_embed.shape[1]
-    pheno_tensor = torch.zeros(n_samples, emb_dim,
-                               dtype=gene_embed.dtype, device=gene_embed.device)
-    # Store raw phenotype features separately
-    pheno_raw = torch.tensor(phenotype_features, dtype=torch.float32)
+    if n_samples > 0:
+        pheno_tensor = torch.zeros(n_samples, emb_dim,
+                                   dtype=gene_embed.dtype, device=gene_embed.device)
+        pheno_raw = torch.tensor(phenotype_features, dtype=torch.float32)
+        x = torch.cat([gene_embed.detach(), cell_embed.detach(), pheno_tensor], dim=0)
+        edge_cp = build_phenotype_edges(cell_to_sample, gene_num, cell_num, n_samples)
+    else:
+        pheno_raw = None
+        x = torch.cat([gene_embed.detach(), cell_embed.detach()], dim=0)
+        edge_cp = None
 
-    x = torch.cat([gene_embed.detach(), cell_embed.detach(), pheno_tensor], dim=0)
+    #START - Combine edges, handling no-phenotype case
+    def _combine_edges(base_edges, cp_edges):
+        if cp_edges is not None:
+            return torch.cat([base_edges, cp_edges], dim=1)
+        return base_edges
 
-    # Build cell-to-phenotype edges
-    edge_cp = build_phenotype_edges(cell_to_sample, gene_num, cell_num, n_samples)
-
-    # Combine original edges + phenotype edges
     if ccc_matrix is None:
-        combined_edges = torch.cat([edge_indexs, edge_cp], dim=1)
+        combined_edges = _combine_edges(edge_indexs, edge_cp)
         edge_index = to_undirected(combined_edges)
         graph_pyg = Graphdata(x=x, edge_index=edge_index, y=y)
     else:
         flatten_edge_features = ccc_matrix[ccc_matrix != 0]
         if len(flatten_edge_features) == 0:
-            # No nonzero CCC edges — treat as if ccc_matrix is None
-            combined_edges = torch.cat([edge_indexs, edge_cp], dim=1)
+            combined_edges = _combine_edges(edge_indexs, edge_cp)
             edge_index = to_undirected(combined_edges)
             graph_pyg = Graphdata(x=x, edge_index=edge_index, y=y)
         else:
@@ -173,10 +184,6 @@ def build_extended_graph_pyg(gene_cell, gene_embed, cell_embed,
             denom = max(max_val - min_val, 1e-8)
             normalized_array = (flatten_edge_features - min_val) / denom
 
-            # NOTE: This assumes the LAST len(normalized_array) edges in
-            # edge_indexs are the CCC-derived edges, and all preceding
-            # edges are non-CCC (weight=1.0). This ordering must be
-            # maintained by the upstream build_graph_nx() function.
             n_non_ccc = edge_indexs.shape[1] - len(normalized_array)
             assert n_non_ccc >= 0, (
                 f"More nonzero CCC entries ({len(normalized_array)}) than "
@@ -185,11 +192,13 @@ def build_extended_graph_pyg(gene_cell, gene_embed, cell_embed,
                 np.ones(n_non_ccc),
                 normalized_array
             ])
-            # Phenotype edges get weight 1.0
-            edge_attr_pheno = np.ones(edge_cp.shape[1])
-            edge_attr = np.concatenate([edge_attr_orig, edge_attr_pheno])
+            if edge_cp is not None:
+                edge_attr_pheno = np.ones(edge_cp.shape[1])
+                edge_attr = np.concatenate([edge_attr_orig, edge_attr_pheno])
+            else:
+                edge_attr = edge_attr_orig
 
-            combined_edges = torch.cat([edge_indexs, edge_cp], dim=1)
+            combined_edges = _combine_edges(edge_indexs, edge_cp)
             undirected_edge_index, undirected_edge_attr = to_undirected(
                 combined_edges, edge_attr=torch.tensor(edge_attr), reduce='mean'
             )
@@ -197,13 +206,16 @@ def build_extended_graph_pyg(gene_cell, gene_embed, cell_embed,
                 x=x, edge_index=undirected_edge_index,
                 edge_attr=undirected_edge_attr, y=y
             )
+    #END
 
     graph_pyg.node_type = node_type
-    graph_pyg.pheno_raw = pheno_raw
+    if pheno_raw is not None:
+        graph_pyg.pheno_raw = pheno_raw
     graph_pyg.n_genes = gene_num
     graph_pyg.n_cells = cell_num
     graph_pyg.n_phenotype = n_samples
-    graph_pyg.cell_to_sample = torch.tensor(cell_to_sample, dtype=torch.long)
+    if cell_to_sample is not None:
+        graph_pyg.cell_to_sample = torch.tensor(cell_to_sample, dtype=torch.long)
 
     print(f'Extended PyG graph: {graph_pyg}')
     print(f'  Genes: {gene_num}, Cells: {cell_num}, Phenotype nodes: {n_samples}')
