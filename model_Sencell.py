@@ -262,6 +262,7 @@ def process_dict(cell_dict,dgl_graph,args):
 def cell_optim(cellmodel, optimizer, sencell_dict, nonsencell_dict,dgl_graph, args, train=False):
     # optimizer = torch.optim.RMSprop(cellmodel.parameters(), lr=0.1, alpha=0.5,
     #                                 weight_decay=1e-4)
+    final_loss = None
     if train:
         cellmodel.train()
         sencell_dict=process_dict(sencell_dict,dgl_graph,args)
@@ -275,6 +276,7 @@ def cell_optim(cellmodel, optimizer, sencell_dict, nonsencell_dict,dgl_graph, ar
             print(loss.item())
             loss.backward()
             optimizer.step()
+        final_loss = loss.item()
 
         torch.save(cellmodel, os.path.join(
             args.output_dir, f'{args.exp_name}_cellmodel.pt'))
@@ -284,7 +286,7 @@ def cell_optim(cellmodel, optimizer, sencell_dict, nonsencell_dict,dgl_graph, ar
         sencell_dict, nonsencell_dict = cellmodel(
             sencell_dict, nonsencell_dict, args.device)
 
-    return cellmodel, sencell_dict, nonsencell_dict
+    return cellmodel, sencell_dict, nonsencell_dict, final_loss
 
 
 def old_cell_optim(sencell_dict, nonsencell_dict, device, retrain=False):

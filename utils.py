@@ -58,6 +58,8 @@ def parse_args():
                        help='Initial learning rate')
     parser.add_argument('--batch_id', type=int, default=0, 
                        help='Batch ID for processing')
+    parser.add_argument('--use_hvg_deg', action='store_true', default=False,
+                       help='Apply per-cell-type HVG filtering before running')
 
     args = parser.parse_args()
     
