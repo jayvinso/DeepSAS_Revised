@@ -1,0 +1,70 @@
+Phenotype-aware attention implementation
+========================================
+
+Goal
+----
+Add phenotype awareness to DeepSAS without changing the existing SnC/SnG
+pipeline or making prediction overly dependent on phenotype labels.
+
+Files changed
+-------------
+1. model_GAT.py
+   - Added a new PhenotypeAttention module.
+   - The module learns a small node-level attention residual from phenotype
+     features and adds it to the original node embedding before the standard
+     GAT layers.
+   - The residual is bounded by --phenotype_attention_weight, which defaults to
+     0.1 and is validated to be no larger than 0.5. This keeps expression and
+     graph topology as the dominant prediction signal.
+   - The phenotype residual uses dropout, controlled by
+     --phenotype_attention_dropout, default 0.2, to reduce direct dependence on
+     phenotype labels.
+   - If no phenotype is provided, the encoder path is unchanged.
+   - get_attention_scores() now applies the same phenotype residual before
+     extracting GAT attention, so the SnC/SnG scoring loop can become
+     phenotype-aware.
+
+2. utils.py
+   - Added CLI arguments:
+     --phenotype_key
+     --phenotype_attention_weight
+     --phenotype_attention_dropout
+   - Added build_phenotype_node_features().
+   - Phenotype values are read from adata.obs[--phenotype_key].
+   - Numeric phenotype columns are median-filled and standardized.
+   - Categorical phenotype columns are one-hot encoded.
+   - Phenotype features are stored only on cell nodes; gene nodes receive zeros
+     and are masked out.
+   - build_graph_pyg() now attaches optional phenotype, phenotype_mask, and
+     phenotype_names attributes to the PyG graph.
+
+3. deepsas_v1.py
+   - Builds phenotype node features after preprocessing and before graph
+     construction.
+   - Passes phenotype graph attributes into GAEModel training and embedding
+     extraction.
+   - Saves phenotype attributes in newly built graph_pyg objects.
+   - Re-attaches phenotype attributes to loaded graph_pyg objects when
+     --phenotype_key is supplied.
+   - Prints a warning if --phenotype_key is supplied while loading an older GAT
+     model that does not contain the phenotype attention module. In that case,
+     rerun with --retrain to train phenotype-aware attention.
+
+How to use
+----------
+Run DeepSAS with a phenotype column from adata.obs:
+
+python deepsas_v1.py --exp_name example --retrain --phenotype_key Status
+
+Optional controls:
+
+--phenotype_attention_weight 0.1
+--phenotype_attention_dropout 0.2
+
+Design notes
+------------
+The implementation does not add phenotype as a direct prediction target and
+does not replace the existing GAT attention. It adds a second, bounded attention
+residual before the original GAT layers. The cap and dropout are the safeguards
+that keep the model phenotype-aware without letting phenotype dominate the
+senescence signal.

@@ -61,6 +61,9 @@ new_data.write_h5ad(os.path.join(args.output_dir, f'{args.exp_name}_new_data.h5a
 gene_cell = new_data.X.toarray().T
 args.gene_num = gene_cell.shape[0]
 args.cell_num = gene_cell.shape[1]
+phenotype_features, phenotype_mask, phenotype_names = utils.build_phenotype_node_features(
+    new_data, args.gene_num, args.phenotype_key)
+args.phenotype_dim = 0 if phenotype_features is None else phenotype_features.shape[1]
 
 print(f'cell num: {new_data.shape[0]}, gene num: {new_data.shape[1]}')
 
@@ -113,7 +116,10 @@ if use_autoencoder:
 
     if args.retrain:
         graph_nx = utils.add_nx_embedding(graph_nx, gene_embed, cell_embed)
-        graph_pyg = utils.build_graph_pyg(gene_cell, gene_embed, cell_embed,edge_indexs)
+        graph_pyg = utils.build_graph_pyg(gene_cell, gene_embed, cell_embed,edge_indexs,
+                                          phenotype=phenotype_features,
+                                          phenotype_mask=phenotype_mask,
+                                          phenotype_names=phenotype_names)
         torch.save(graph_nx, os.path.join(args.output_dir, f'{args.exp_name}_graphnx.data'))
         torch.save(graph_pyg, os.path.join(args.output_dir, f'{args.exp_name}_graphpyg.data'))
 
@@ -131,7 +137,10 @@ else:
         gene_embed=torch.tensor(gene_embed)
         
         graph_nx = utils.add_nx_embedding(graph_nx, gene_embed, cell_embed)
-        graph_pyg = utils.build_graph_pyg(gene_cell, gene_embed, cell_embed,edge_indexs,ccc_matrix)
+        graph_pyg = utils.build_graph_pyg(gene_cell, gene_embed, cell_embed,edge_indexs,ccc_matrix,
+                                          phenotype=phenotype_features,
+                                          phenotype_mask=phenotype_mask,
+                                          phenotype_names=phenotype_names)
         torch.save(graph_nx, os.path.join(args.output_dir, f'{args.exp_name}_graphnx.data'))
         torch.save(graph_pyg, os.path.join(args.output_dir, f'{args.exp_name}_graphpyg.data'))
         print('graph nx and pyg saved!')
@@ -139,6 +148,10 @@ else:
         print('Load graph nx and pyg ...')
         graph_nx=torch.load(os.path.join(args.output_dir, f'{args.exp_name}_graphnx.data'))
         graph_pyg=torch.load(os.path.join(args.output_dir, f'{args.exp_name}_graphpyg.data'))
+        if phenotype_features is not None:
+            graph_pyg.phenotype = phenotype_features
+            graph_pyg.phenotype_mask = phenotype_mask
+            graph_pyg.phenotype_names = phenotype_names
 
 logger.info("Part 2, AE end!")
 logger.info("====== Part 3: GAT training ======")
@@ -150,14 +163,18 @@ torch.cuda.empty_cache()
 
 if args.retrain:
     # Initialize model and optimizer
-    model = GAEModel(args.emb_size, args.emb_size).to(device)
+    model = GAEModel(args.emb_size, args.emb_size, args.phenotype_dim,
+                     args.phenotype_attention_weight,
+                     args.phenotype_attention_dropout).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
     # Training loop
     def train():
         model.train()
         optimizer.zero_grad()
-        z = model.encode(data.x, data.edge_index)
+        z = model.encode(data.x, data.edge_index,
+                         getattr(data, "phenotype", None),
+                         getattr(data, "phenotype_mask", None))
         loss = model.recon_loss(z, data.edge_index)
         loss.backward()
         optimizer.step()
@@ -176,6 +193,8 @@ else:
     print(f'Load GAT from {GAT_path}')
     model=torch.load(GAT_path)
     model=model.to(device)
+    if phenotype_features is not None and getattr(model.encoder, "phenotype_attention", None) is None:
+        print('Phenotype key was provided, but the loaded GAT has no phenotype attention module. Run with --retrain to train phenotype-aware attention.')
     
 torch.cuda.empty_cache() 
 
@@ -433,7 +452,9 @@ for epoch in range(5):
     else:
         old_sencell_dict=None
     
-    GAT_embeddings=model(data.x,data.edge_index).detach()
+    GAT_embeddings=model(data.x,data.edge_index,
+                         getattr(data, "phenotype", None),
+                         getattr(data, "phenotype_mask", None)).detach()
     sencell_dict, nonsencell_dict=build_cell_dict(gene_cell,predicted_cell_indexs,GAT_embeddings,graph_nx)
     
     if old_sencell_dict is not None:

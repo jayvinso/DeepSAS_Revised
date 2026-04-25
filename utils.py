@@ -42,6 +42,12 @@ def parse_args():
                        help='Gene set to use (senmayo, fridman, etc.)')
     parser.add_argument('--emb_size', type=int, default=12, 
                        help='Embedding dimension size')
+    parser.add_argument('--phenotype_key', type=str, default='', 
+                       help='Optional adata.obs column for phenotype-aware attention')
+    parser.add_argument('--phenotype_attention_weight', type=float, default=0.1, 
+                       help='Maximum weight for phenotype-aware attention residual')
+    parser.add_argument('--phenotype_attention_dropout', type=float, default=0.2, 
+                       help='Dropout applied inside phenotype-aware attention')
 
     # Training parameters
     parser.add_argument('--gat_epoch', type=int, default=30, 
@@ -67,6 +73,12 @@ def parse_args():
     
     if args.gat_epoch <= 0 or args.sencell_epoch <= 0 or args.cell_optim_epoch <= 0:
         parser.error("Number of epochs must be positive")
+
+    if args.phenotype_attention_weight < 0 or args.phenotype_attention_weight > 0.5:
+        parser.error("Phenotype attention weight must be between 0 and 0.5")
+
+    if args.phenotype_attention_dropout < 0 or args.phenotype_attention_dropout >= 1:
+        parser.error("Phenotype attention dropout must be in [0, 1)")
     
     return args
 
@@ -408,7 +420,50 @@ def add_nx_embedding(graph_nx, gene_embed, cell_embed):
     return graph_nx
 
 
-def build_graph_pyg(gene_cell, gene_embed, cell_embed,edge_indexs,ccc_matrix):
+def build_phenotype_node_features(adata, gene_num, phenotype_key):
+    if phenotype_key is None or phenotype_key == '':
+        return None, None, []
+
+    if phenotype_key not in adata.obs:
+        raise ValueError(f'Phenotype key "{phenotype_key}" was not found in adata.obs')
+
+    phenotype_series = adata.obs[phenotype_key]
+    valid_cells = ~phenotype_series.isna().to_numpy()
+    if valid_cells.sum() == 0:
+        raise ValueError(f'Phenotype key "{phenotype_key}" contains only missing values')
+
+    if pd.api.types.is_numeric_dtype(phenotype_series):
+        values = phenotype_series.astype(float).to_numpy().reshape(-1, 1)
+        median_value = np.nanmedian(values)
+        values = np.where(np.isnan(values), median_value, values)
+        std_value = np.std(values)
+        if std_value == 0:
+            std_value = 1.0
+        cell_phenotype = (values - np.mean(values)) / std_value
+        phenotype_names = [phenotype_key]
+    else:
+        values = phenotype_series.astype('object').where(phenotype_series.notna(), '__missing__')
+        phenotype_df = pd.get_dummies(values, prefix=phenotype_key)
+        if f'{phenotype_key}___missing__' in phenotype_df.columns:
+            phenotype_df = phenotype_df.drop(columns=[f'{phenotype_key}___missing__'])
+        cell_phenotype = phenotype_df.to_numpy(dtype=np.float32)
+        phenotype_names = list(phenotype_df.columns)
+
+    if cell_phenotype.shape[1] == 0:
+        raise ValueError(f'Phenotype key "{phenotype_key}" has no usable non-missing categories')
+
+    phenotype = np.zeros((gene_num + adata.n_obs, cell_phenotype.shape[1]), dtype=np.float32)
+    phenotype[gene_num:] = cell_phenotype.astype(np.float32)
+
+    phenotype_mask = np.zeros(gene_num + adata.n_obs, dtype=bool)
+    phenotype_mask[gene_num:] = valid_cells
+
+    print(f'Phenotype-aware attention enabled with key "{phenotype_key}" and {cell_phenotype.shape[1]} feature(s)')
+    return torch.tensor(phenotype, dtype=torch.float32), torch.tensor(phenotype_mask), phenotype_names
+
+
+def build_graph_pyg(gene_cell, gene_embed, cell_embed,edge_indexs,ccc_matrix=None,
+                    phenotype=None, phenotype_mask=None, phenotype_names=None):
     print("build graph pyg")
     # Represents the node type
     y = [True]*gene_cell.shape[0]+[False]*gene_cell.shape[1]
@@ -434,6 +489,11 @@ def build_graph_pyg(gene_cell, gene_embed, cell_embed,edge_indexs,ccc_matrix):
                                                             edge_attr=torch.tensor(edge_attr),reduce='mean')
         
         graph_pyg = Graphdata(x=x, edge_index=undirected_edge_index,edge_attr=undirected_edge_attr, y=y)
+
+    if phenotype is not None:
+        graph_pyg.phenotype = phenotype
+        graph_pyg.phenotype_mask = phenotype_mask
+        graph_pyg.phenotype_names = phenotype_names or []
 
     print('Pyg graph:', graph_pyg)
     print('graph.is_directed():', graph_pyg.is_directed())
@@ -538,8 +598,10 @@ def get_sencell_cover(old_sencell_dict, sencell_dict):
     set1 = set(list(old_sencell_dict.keys()))
     set2 = set(list(sencell_dict.keys()))
     set3 = set1.intersection(set2)
+    if len(set2) == 0:
+        print('sencell cover: 0.0 (sencell_dict is empty)')
+        return 0.0
     print('sencell cover:', len(set3)/len(set2))
-
     return len(set3)/len(set2)
 
 def get_sencell_intersection(old_sencell_dict, sencell_dict):
