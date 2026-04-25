@@ -1,6 +1,7 @@
 # Ignore everything
 *
 
+.env
 !deepsas_v1.py
 !utils.py
 !model_AE.py

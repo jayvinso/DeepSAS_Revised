@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import torch
 from torch.optim.lr_scheduler import ExponentialLR
@@ -5,7 +6,7 @@ from torch.optim.lr_scheduler import ExponentialLR
 import utils
 from model_AE import reduction_AE
 from model_GAT import GAEModel
-from model_Sencell import Sencell
+from model_Sencell import Sencell, get_cluster_cell_dict, getPrototypeEmb
 from model_Sencell import cell_optim, update_cell_embeddings
 
 import logging
@@ -228,6 +229,8 @@ if args.retrain:
     model = GAEModel(args.emb_size, args.emb_size).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
+    gat_losses = []
+
     # Training loop
     def train():
         model.train()
@@ -241,6 +244,7 @@ if args.retrain:
     # Training the model
     for epoch in range(args.gat_epoch):
         loss = train()
+        gat_losses.append(loss)
         print(f'Epoch {epoch:03d}, Loss: {loss:.4f}')
 
     GAT_path=os.path.join(args.output_dir, f'{args.exp_name}_GAT.pt')
@@ -483,6 +487,7 @@ optimizer = torch.optim.Adam(cellmodel.parameters(), lr=lr,
 scheduler = ExponentialLR(optimizer, gamma=0.85)
 sencell_dict=None
 
+epoch_metrics_log = []
 
 # Extracting attention scores
 edge_index_selfloop_cell,attention_scores_cell = model.get_attention_scores(data)
@@ -523,7 +528,7 @@ for epoch in range(5):
         ratio_cell = utils.get_sencell_cover(old_sencell_dict, sencell_dict)
 
     # gene part
-    cellmodel, sencell_dict, nonsencell_dict = cell_optim(cellmodel, optimizer,
+    cellmodel, sencell_dict, nonsencell_dict, mdr_loss = cell_optim(cellmodel, optimizer,
                                                           sencell_dict, nonsencell_dict,
                                                           None,
                                                           args,
@@ -550,5 +555,202 @@ for epoch in range(5):
         sencell_dict, gene_cell, edge_index_selfloop, attention_scores, sen_gene_ls)
     ratio_gene = utils.get_sengene_cover(old_sengene_indexs, sen_gene_ls)
 
+    epoch_entry = {
+        'epoch': epoch,
+        'mdr_loss': mdr_loss,
+        'snc_cover_ratio': ratio_cell if old_sencell_dict is not None else None,
+        'sng_cover_ratio': float(ratio_gene),
+        'num_snc': len(sencell_dict),
+        'num_sng': len(sen_gene_ls),
+    }
+    epoch_metrics_log.append(epoch_entry)
+    logger.info(f"Epoch {epoch} | MDR loss: {mdr_loss:.6f} | SnC cover: {epoch_entry['snc_cover_ratio']} | SnG cover: {epoch_entry['sng_cover_ratio']:.4f} | #SnC: {epoch_entry['num_snc']} | #SnG: {epoch_entry['num_sng']}")
+
     torch.save([sencell_dict, sen_gene_ls, attention_scores, edge_index_selfloop],
                os.path.join(args.output_dir, f'{args.exp_name}_sencellgene-epoch{epoch}.data'))
+
+# ============================================================
+# POST-TRAINING EVALUATION METRICS
+# ============================================================
+logger.info("====== Post-training: Computing evaluation metrics ======")
+
+from scipy.stats import mannwhitneyu
+from sklearn.metrics import silhouette_score, roc_auc_score
+import pandas as pd
+
+post_metrics = {}
+
+# ------------------------------------------------------------------
+# 1a. Latent space separation: d1, d2, d3
+# ------------------------------------------------------------------
+logger.info("Computing d1 / d2 / d3 latent space distances ...")
+cellmodel.eval()
+with torch.no_grad():
+    cluster_sencell, cluster_nonsencell = get_cluster_cell_dict(sencell_dict, nonsencell_dict)
+    prototype_emb = getPrototypeEmb(sencell_dict, cluster_sencell)
+    d1 = cellmodel.get_d1(sencell_dict, cluster_sencell, prototype_emb)
+    d2 = cellmodel.get_d2(sencell_dict, cluster_sencell, prototype_emb)
+    d3 = cellmodel.get_d3(nonsencell_dict, cluster_nonsencell, prototype_emb)
+
+d1_flat = [d.item() for cluster in d1 for d in cluster]
+d2_flat = [d.item() for cluster in d2 for d in cluster]
+d3_flat = [d.item() for cluster in d3 for d in cluster]
+
+post_metrics['mean_d1'] = float(np.mean(d1_flat)) if d1_flat else None
+post_metrics['mean_d2'] = float(np.mean(d2_flat)) if d2_flat else None
+post_metrics['mean_d3'] = float(np.mean(d3_flat)) if d3_flat else None
+post_metrics['d1_lt_d2'] = bool(post_metrics['mean_d1'] < post_metrics['mean_d2']) if (post_metrics['mean_d1'] is not None and post_metrics['mean_d2'] is not None) else None
+post_metrics['d1_lt_d3'] = bool(post_metrics['mean_d1'] < post_metrics['mean_d3']) if (post_metrics['mean_d1'] is not None and post_metrics['mean_d3'] is not None) else None
+logger.info(f"  mean d1={post_metrics['mean_d1']:.4f}  d2={post_metrics['mean_d2']:.4f}  d3={post_metrics['mean_d3']:.4f}  d1<d2={post_metrics['d1_lt_d2']}  d1<d3={post_metrics['d1_lt_d3']}")
+
+# ------------------------------------------------------------------
+# 1b. Feature distribution concentration φ' (ProtoNCE prototype loss)
+# ------------------------------------------------------------------
+with torch.no_grad():
+    phi_prime = cellmodel.prototypeLoss(d1)
+post_metrics['phi_prime'] = float(phi_prime.item())
+logger.info(f"  φ' (prototype concentration) = {post_metrics['phi_prime']:.6f}")
+
+# ------------------------------------------------------------------
+# 1c. Final MDR (contrastive) loss
+# ------------------------------------------------------------------
+with torch.no_grad():
+    final_mdr = cellmodel.loss(sencell_dict, nonsencell_dict)
+post_metrics['final_mdr_loss'] = float(final_mdr.item())
+logger.info(f"  Final MDR loss = {post_metrics['final_mdr_loss']:.6f}")
+
+# ------------------------------------------------------------------
+# 2a. Hallmark gene enrichment: intersection with SenMayo/Fridman/CellAge
+# ------------------------------------------------------------------
+logger.info("Computing hallmark SnG enrichment ...")
+marker_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'senescence_marker_list.csv')
+if os.path.exists(marker_path):
+    marker_df = pd.read_csv(marker_path)
+    hallmark_genes = {}
+    for col in marker_df.columns:
+        hallmark_genes[col] = set(marker_df[col].dropna().str.strip().tolist())
+    all_hallmarks = set().union(*hallmark_genes.values())
+
+    predicted_gene_names = set(new_data.var_names[[int(g) for g in sen_gene_ls]])
+    post_metrics['predicted_sng_count'] = len(predicted_gene_names)
+
+    for hallmark_name, hallmark_set in hallmark_genes.items():
+        intersection = hallmark_set & predicted_gene_names
+        union = hallmark_set | predicted_gene_names
+        post_metrics[f'hallmark_precision_{hallmark_name}'] = float(len(intersection) / len(predicted_gene_names)) if predicted_gene_names else 0.0
+        post_metrics[f'hallmark_recall_{hallmark_name}'] = float(len(intersection) / len(hallmark_set)) if hallmark_set else 0.0
+        post_metrics[f'hallmark_iou_{hallmark_name}'] = float(len(intersection) / len(union)) if union else 0.0
+        logger.info(f"  {hallmark_name}: precision={post_metrics[f'hallmark_precision_{hallmark_name}']:.4f}  recall={post_metrics[f'hallmark_recall_{hallmark_name}']:.4f}  IoU={post_metrics[f'hallmark_iou_{hallmark_name}']:.4f}")
+
+    all_intersection = all_hallmarks & predicted_gene_names
+    all_union = all_hallmarks | predicted_gene_names
+    post_metrics['hallmark_all_iou'] = float(len(all_intersection) / len(all_union)) if all_union else 0.0
+    logger.info(f"  All hallmarks combined IoU = {post_metrics['hallmark_all_iou']:.4f}")
+else:
+    logger.warning(f"  senescence_marker_list.csv not found at {marker_path}, skipping hallmark enrichment.")
+
+# ------------------------------------------------------------------
+# 2b. Phenotype DEG overlap (IoU of predicted SnGs vs. phenotype DEGs)
+# ------------------------------------------------------------------
+deg_dir = os.path.join(args.output_dir, 'Senescent_Tables')
+if os.path.exists(deg_dir):
+    logger.info("Computing phenotype DEG overlap (IoU) ...")
+    import glob
+    deg_files = glob.glob(os.path.join(deg_dir, '*_DEG_results.csv'))
+    if deg_files and 'predicted_gene_names' in dir():
+        all_deg_genes = set()
+        for f in deg_files:
+            try:
+                deg_df = pd.read_csv(f)
+                sig_degs = deg_df[deg_df['p_val_adj'] < 0.05]['gene'].tolist()
+                all_deg_genes.update(sig_degs)
+            except Exception:
+                pass
+        if all_deg_genes:
+            deg_intersection = predicted_gene_names & all_deg_genes
+            deg_union = predicted_gene_names | all_deg_genes
+            post_metrics['deg_overlap_iou'] = float(len(deg_intersection) / len(deg_union))
+            post_metrics['deg_overlap_count'] = len(deg_intersection)
+            logger.info(f"  SnG–DEG IoU = {post_metrics['deg_overlap_iou']:.4f}  ({post_metrics['deg_overlap_count']} overlapping genes)")
+
+# ------------------------------------------------------------------
+# 3. Phenotype separation: AUROC + Mann-Whitney U
+# ------------------------------------------------------------------
+logger.info("Computing phenotype separation metrics ...")
+pheno_scores_final = generate_pheno_specific_scores(
+    sen_gene_ls, gene_cell, edge_index_selfloop, attention_scores, graph_nx)
+phenotype_conditions = list(pheno_scores_final.keys())
+post_metrics['phenotype_conditions'] = phenotype_conditions
+
+if len(phenotype_conditions) == 2:
+    scores_a = [v[0] for v in pheno_scores_final[phenotype_conditions[0]]]
+    scores_b = [v[0] for v in pheno_scores_final[phenotype_conditions[1]]]
+    if scores_a and scores_b:
+        mw_stat, mw_p = mannwhitneyu(scores_a, scores_b, alternative='two-sided')
+        all_scores = scores_a + scores_b
+        labels_pheno = [1] * len(scores_a) + [0] * len(scores_b)
+        auroc = roc_auc_score(labels_pheno, all_scores)
+        post_metrics['phenotype_mannwhitney_stat'] = float(mw_stat)
+        post_metrics['phenotype_mannwhitney_p'] = float(mw_p)
+        post_metrics['phenotype_auroc'] = float(auroc)
+        post_metrics['phenotype_mean_score'] = {
+            phenotype_conditions[0]: float(np.mean(scores_a)),
+            phenotype_conditions[1]: float(np.mean(scores_b)),
+        }
+        logger.info(f"  Phenotype AUROC = {auroc:.4f}  MW p = {mw_p:.4e}")
+elif len(phenotype_conditions) > 2:
+    logger.info(f"  >2 phenotypes detected ({phenotype_conditions}); reporting per-condition mean SnC score.")
+    post_metrics['phenotype_mean_score'] = {
+        cond: float(np.mean([v[0] for v in pheno_scores_final[cond]])) for cond in phenotype_conditions
+    }
+
+# ------------------------------------------------------------------
+# 4. SnC silhouette score (SnC vs. non-SnC in embedding space)
+# ------------------------------------------------------------------
+logger.info("Computing SnC silhouette score ...")
+snc_keys = list(sencell_dict.keys())
+nonsnc_keys = list(nonsencell_dict.keys())
+if snc_keys and nonsnc_keys:
+    snc_embs = torch.stack([sencell_dict[k][2].detach().cpu() for k in snc_keys])
+    nonsnc_embs = torch.stack([nonsencell_dict[k][2].detach().cpu() for k in nonsnc_keys])
+    all_embs = torch.cat([snc_embs, nonsnc_embs], dim=0).numpy()
+    sil_labels = [1] * len(snc_keys) + [0] * len(nonsnc_keys)
+    sil_score = silhouette_score(all_embs, sil_labels)
+    post_metrics['snc_silhouette_score'] = float(sil_score)
+    logger.info(f"  SnC silhouette score = {sil_score:.4f}")
+
+# ------------------------------------------------------------------
+# 5. GAE graph reconstruction BCE loss (final)
+# ------------------------------------------------------------------
+logger.info("Computing final GAE reconstruction loss ...")
+model.eval()
+with torch.no_grad():
+    z_final = model.encode(data.x, data.edge_index)
+    gae_recon_loss = model.recon_loss(z_final, data.edge_index)
+post_metrics['gae_final_recon_loss'] = float(gae_recon_loss.item())
+logger.info(f"  Final GAE BCE recon loss = {post_metrics['gae_final_recon_loss']:.6f}")
+
+if args.retrain:
+    post_metrics['gat_loss_trajectory'] = gat_losses
+    post_metrics['gae_initial_recon_loss'] = gat_losses[0] if gat_losses else None
+    post_metrics['gae_loss_reduction'] = float(gat_losses[0] - gat_losses[-1]) if len(gat_losses) > 1 else None
+
+# ------------------------------------------------------------------
+# 6. Convergence: per-epoch log summary
+# ------------------------------------------------------------------
+post_metrics['epoch_metrics'] = epoch_metrics_log
+final_snc_cover = epoch_metrics_log[-1]['snc_cover_ratio'] if epoch_metrics_log else None
+final_sng_cover = epoch_metrics_log[-1]['sng_cover_ratio'] if epoch_metrics_log else None
+post_metrics['final_snc_cover_ratio'] = final_snc_cover
+post_metrics['final_sng_cover_ratio'] = final_sng_cover
+logger.info(f"  Final SnC cover ratio = {final_snc_cover}  |  Final SnG cover ratio = {final_sng_cover}")
+
+# ------------------------------------------------------------------
+# Save all metrics to JSON
+# ------------------------------------------------------------------
+metrics_path = os.path.join(args.output_dir, f'{args.exp_name}_eval_metrics.json')
+with open(metrics_path, 'w') as f:
+    json.dump(post_metrics, f, indent=2, default=str)
+logger.info(f"All evaluation metrics saved to: {metrics_path}")
+logger.info("====== Evaluation complete ======")
+
