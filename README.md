@@ -116,7 +116,43 @@ For datasets with many cells (>50,000), use the sampling approach detailed in [S
 
 ### Phenotype related Analysis
 
-To incorporate the phenotype information into the analysis, please following the tutorial in [`phenotype_analysis`](./phenotype_analysis/README.md).
+
+### Phenotype Injection (Age/Disease Metadata)
+
+DeepSAS supports phenotype injection, which incorporates age and disease status metadata into the GAT model for improved senescent cell and gene identification. This is controlled by the `--phenotype_attention` flag (on by default if specified, off with `--no-phenotype_attention`).
+
+**To run with phenotype injection ON:**
+
+```bash
+uv run python deepsas_v1.py \
+   --input_data_count example_data/example_data.h5ad \
+   --exp_name example_pheno_on \
+   --phenotype_attention \
+   --retrain \
+   --device_index 0
+```
+
+**To run with phenotype injection OFF:**
+
+```bash
+uv run python deepsas_v1.py \
+   --input_data_count example_data/example_data.h5ad \
+   --exp_name example_pheno_off \
+   --no-phenotype_attention \
+   --retrain \
+   --device_index 0
+```
+
+When enabled, phenotype injection will:
+- Detect age and disease status columns in your AnnData (`adata.obs`)
+- Bucket age into young (<40), middle-aged (40-59), old (60+)
+- Encode disease status as healthy/control vs. disease
+- Use a phenotype-aware GAT model (DualHeadPhenotypeGAT)
+- Output detailed score diagnostics in `outputs/<exp_name>/<exp_name>_snc_score_diagnostics.csv`
+
+If phenotype metadata is missing, the run will fail with an explicit error.
+
+For more details, see [`pheno injection description`](./pheno%20injection%20description) and [`phenotype_analysis`](./phenotype_analysis/README.md).
 
 
 ## Input Data Format
@@ -140,7 +176,9 @@ DeepSAS accepts the following parameters:
 - `--retrain`: Whether to retrain models or use saved ones
 - `--timestamp`: Timestamp for the experiment (optional)
 
+
 ### Model Configuration
+- `--phenotype_attention` / `--no-phenotype_attention`: Enable or disable phenotype injection (age/disease metadata integration). When enabled, the model uses phenotype-aware GAT and expects age/disease columns in your data. Default: **off** unless specified.
 - `--seed`: Random seed for reproducibility
 - `--n_genes`: Number of genes to use (3000, 8000 or full)
 - `--ccc`: Cell-cell edge type: type1 (binary), type2 (continuous), type3 (none)
@@ -155,6 +193,7 @@ DeepSAS accepts the following parameters:
 - `--cell_optim_epoch`: Number of epochs for cell embedding optimization
 - `--learning_rate`: Initial learning rate
 - `--batch_id`: Batch ID for processing
+- `--mixed_precision` / `--no-mixed_precision`: Enable or disable BF16 mixed precision training (default: **enabled**). Mixed precision uses BF16 on compatible CUDA GPUs (e.g., A100, H100) for significantly faster training with reduced memory usage and no loss in model quality. Disable with `--no-mixed_precision` if you encounter numerical instability or are using older GPUs that do not support BF16.
 
 ## Output Files
 
